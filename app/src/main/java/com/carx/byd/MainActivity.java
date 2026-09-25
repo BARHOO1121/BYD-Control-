@@ -110,13 +110,20 @@ public final class MainActivity extends Activity {
         country.setAdapter(regionAdapter);
         country.setBackground(rounded(PANEL_2, 14, GOLD_DARK, 1));
         country.setPadding(dp(10),0,dp(10),0);
-        int savedRegion = findRegionIndex(securePrefs.get("region", "JO"));
+        String savedUser = securePrefs.get("username", "");
+        String savedCode = securePrefs.get("region", "CN");
+        if (savedUser.startsWith("+86") || savedUser.startsWith("0086")) savedCode = "CN";
+        int savedRegion = findRegionIndex(savedCode);
         country.setSelection(savedRegion);
         card.addView(country, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
 
-        EditText username = input("رقم الهاتف أو البريد في حساب BYD", false);
+        EditText username = input("رقم الهاتف الصيني (+86 أو 11 رقم)", false);
+        username.setInputType(InputType.TYPE_CLASS_PHONE);
         username.setText(securePrefs.get("username", ""));
         card.addView(username, lpMatch(dp(13),0));
+        TextView phoneHint = label("حساب الصين: اكتب +86 عادي؛ Car X يحوله تلقائياً إلى الرقم المحلي المطلوب من BYD.", 10, MUTED, false);
+        phoneHint.setGravity(Gravity.RIGHT);
+        card.addView(phoneHint, lpMatch(dp(5),0));
         EditText password = input("كلمة مرور حساب BYD", true);
         password.setText(securePrefs.get("password", ""));
         card.addView(password, lpMatch(dp(11),0));
@@ -146,7 +153,7 @@ public final class MainActivity extends Activity {
         statusRow.addView(globalStatus, sp);
         card.addView(statusRow, lpMatch(dp(13),0));
 
-        TextView foot = label("Car X BYD • Alpha 1\nمبني على البروتوكول المفتوح pyBYD (MIT)", 11, Color.rgb(105,105,105), false);
+        TextView foot = label("Car X BYD • Alpha 2 China\nBYD China WBSK + pyBYD interoperability", 11, Color.rgb(105,105,105), false);
         foot.setGravity(Gravity.CENTER);
         root.addView(foot, lpMatch(dp(7),0));
 
@@ -155,7 +162,15 @@ public final class MainActivity extends Activity {
             String p = password.getText().toString();
             String cp = pin.getText().toString().trim();
             BydRegion region = (BydRegion) country.getSelectedItem();
+            if (u.startsWith("+86") || u.startsWith("0086")) {
+                region = BydRegion.SUPPORTED.get(0);
+                country.setSelection(0);
+            }
             if (u.isEmpty() || p.isEmpty()) { toast("أدخل حساب BYD وكلمة المرور"); return; }
+            String normalizedPhone = u.replace(" ", "");
+            if (normalizedPhone.startsWith("+86")) normalizedPhone = normalizedPhone.substring(3);
+            if (normalizedPhone.startsWith("0086")) normalizedPhone = normalizedPhone.substring(4);
+            if (region.china && !normalizedPhone.matches("1\\d{10}")) { toast("رقم حساب BYD الصيني يجب أن يكون 11 رقماً، ويمكن إدخاله مع +86"); return; }
             if (!cp.isEmpty() && !cp.matches("\\d{6}")) { toast("PIN التحكم يجب أن يكون 6 أرقام"); return; }
             securePrefs.put("username", u);
             securePrefs.put("password", p);
@@ -173,11 +188,6 @@ public final class MainActivity extends Activity {
                     vehicles = client.getVehicles();
                     if (vehicles.length() == 0) throw new BydApiClient.BydException("لم يعثر BYD على سيارات مرتبطة بهذا الحساب");
                     currentVehicle = vehicles.getJSONObject(0);
-                    if (!config.controlPin.isEmpty()) {
-                        runOnUiThread(() -> setStatus("التحقق من PIN التحكم…"));
-                        try { client.verifyControlPin(BydApiClient.value(currentVehicle,"vin")); }
-                        catch (Exception ignored) { /* command action will show precise error if needed */ }
-                    }
                     runOnUiThread(() -> {
                         setBusy(false, "تم الاتصال بنجاح");
                         showDashboard();
@@ -267,7 +277,7 @@ public final class MainActivity extends Activity {
         root.addView(actions,lpMatch(0,dp(16)));
 
         Button refresh=primaryButton("تحديث بيانات السيارة"); refresh.setOnClickListener(v->refreshRealtime()); root.addView(refresh,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(54)));
-        TextView legal=label("Car X BYD Alpha 1 • واجهة مستقلة تعتمد على BYD Cloud\nBYD واسمها التجاري ملك لأصحابها. pyBYD مستخدم وفق ترخيص MIT.",10,Color.rgb(100,100,100),false); legal.setGravity(Gravity.CENTER); root.addView(legal,lpMatch(dp(16),0));
+        TextView legal=label("Car X BYD Alpha 2 • China + Global Cloud\nBYD واسمها التجاري ملك لأصحابها. لا تُرسل بيانات دخولك إلى Car X أو ChatGPT.",10,Color.rgb(100,100,100),false); legal.setGravity(Gravity.CENTER); root.addView(legal,lpMatch(dp(16),0));
 
         setContentView(scroll);
         renderVehicleHeader();
