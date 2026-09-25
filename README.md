@@ -1,8 +1,8 @@
-# Car X BYD — Alpha 4
+# Car X BYD — Alpha 4.1
 
 Android prototype for BYD China Cloud with an Arabic-first Car X interface.
 
-## Alpha 4 highlights
+## Alpha 4.1 highlights
 
 - Keeps the BYD China login/WBSK engine that was validated against a mainland BYD account.
 - Red/black premium theme is the default.
@@ -32,3 +32,12 @@ GitHub Actions builds the debug APK on pushes to `main`. The artifact name is `C
 ## Important
 
 This is an independent interoperability project and is not an official BYD application. BYD trademarks and vehicle imagery belong to their respective owners.
+
+
+## Alpha 4.1 fixes
+
+- Vehicle cloud state is no longer hard-coded to connected.
+- The hero chip now means account session is logged in, not vehicle online state.
+- Realtime refresh updates vehicle connection state dynamically when BYD returns it.
+- QR scanning now runs inline in Car X instead of launching ZXing CaptureActivity, avoiding the immediate scanner crash seen on the test phone.
+- Camera permission is requested explicitly before QR scanning.

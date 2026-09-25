@@ -2,7 +2,8 @@ package com.carx.byd;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.Intent;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -26,8 +27,10 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.google.zxing.integration.android.IntentIntegrator;
-import com.google.zxing.integration.android.IntentResult;
+import com.google.zxing.ResultPoint;
+import com.journeyapps.barcodescanner.BarcodeCallback;
+import com.journeyapps.barcodescanner.BarcodeResult;
+import com.journeyapps.barcodescanner.DecoratedBarcodeView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -51,11 +54,15 @@ public final class MainActivity extends Activity {
 
     private TextView globalStatus;
     private ProgressBar globalProgress;
-    private TextView batteryValue, rangeValue, odometerValue, lockValue, tempValue, chargeValue, vinValue, modelValue;
+    private TextView batteryValue, rangeValue, odometerValue, lockValue, tempValue, chargeValue, vinValue, modelValue, cloudStateValue;
     private Spinner vehicleSpinner;
     private ImageView heroCarArt;
     private String lastQrScanId = "";
     private String lastQrVin = "";
+    private static final int CAMERA_PERMISSION_REQUEST = 7401;
+    private DecoratedBarcodeView qrScannerView;
+    private boolean qrScannerOpen = false;
+    private boolean pendingQrAfterPermission = false;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -67,8 +74,25 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (qrScannerView != null) {
+            try { qrScannerView.pause(); } catch (Exception ignored) {}
+        }
         worker.shutdownNow();
         super.onDestroy();
+    }
+
+    @Override protected void onPause() {
+        if (qrScannerOpen && qrScannerView != null) {
+            try { qrScannerView.pause(); } catch (Exception ignored) {}
+        }
+        super.onPause();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (qrScannerOpen && qrScannerView != null && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            try { qrScannerView.resume(); } catch (Exception ignored) {}
+        }
     }
 
     private void applySystemBars() {
@@ -296,7 +320,7 @@ public final class MainActivity extends Activity {
         vinValue=label("VIN —",10,theme.muted,false); vinValue.setGravity(Gravity.RIGHT);
         nameBox.addView(modelValue);nameBox.addView(vinValue,lpMatch(dp(4),0));
         heroTop.addView(nameBox,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f));
-        TextView connected=chip("●  متصل",mix(theme.green,theme.bg,0.12f),theme.green);
+        TextView connected=chip("✓  الحساب مسجّل",mix(theme.green,theme.bg,0.12f),theme.green);
         heroTop.addView(connected);
         hero.addView(heroTop);
 
@@ -323,11 +347,11 @@ public final class MainActivity extends Activity {
         lockValue=smallMetric("القفل","—");
         tempValue=smallMetric("حرارة المقصورة","—");
         chargeValue=smallMetric("الشحن","—");
-        TextView cloudState=smallMetric("حالة السحابة","متصل");
+        cloudStateValue=smallMetric("اتصال السيارة","غير معروف");
         info.addView(infoCard("⌖",lockValue),gridLp());
         info.addView(infoCard("♨",tempValue),gridLp());
         info.addView(infoCard("⚡",chargeValue),gridLp());
-        info.addView(infoCard("☁",cloudState),gridLp());
+        info.addView(infoCard("☁",cloudStateValue),gridLp());
         root.addView(info,lpMatch(0,dp(14)));
 
         // QR completion card.
@@ -370,7 +394,7 @@ public final class MainActivity extends Activity {
         nav.addView(navItem("▦","المزيد",false,()->showSettings()),new LinearLayout.LayoutParams(0,dp(64),1));
         root.addView(nav,lpMatch(dp(14),dp(8)));
 
-        TextView legal=label("Car X BYD • Alpha 4 • China Cloud • Dev _ Ibraheem",9,theme.muted2,false);
+        TextView legal=label("Car X BYD • Alpha 4.1 • China Cloud • Dev _ Ibraheem",9,theme.muted2,false);
         legal.setGravity(Gravity.CENTER);root.addView(legal);
 
         setContentView(scroll);
@@ -405,11 +429,16 @@ public final class MainActivity extends Activity {
         if(client==null||currentVehicle==null)return;
         String vin=BydApiClient.value(currentVehicle,"vin"); int energy=BydApiClient.energyType(currentVehicle);
         setBusy(true,"طلب البيانات الحية من السيارة…");
+        if (cloudStateValue != null) setSmallMetricValue(cloudStateValue,"جارٍ التحقق");
         worker.execute(()->{
             try{
                 realtime=client.getRealtime(vin,energy);
                 runOnUiThread(()->{renderRealtime();setBusy(false,"تم التحديث الآن");});
-            }catch(Exception e){runOnUiThread(()->{setBusy(false,"تعذر تحديث البيانات");toast(readableError(e));});}
+            }catch(Exception e){runOnUiThread(()->{
+                if (cloudStateValue != null) setSmallMetricValue(cloudStateValue,"تعذر الاتصال");
+                setBusy(false,"تعذر تحديث البيانات");
+                toast(readableError(e));
+            });}
         });
     }
 
@@ -421,10 +450,12 @@ public final class MainActivity extends Activity {
         String temp=BydApiClient.value(realtime,"tempInCar","temp_in_car");
         String locked=BydApiClient.value(realtime,"isLocked","is_locked");
         String charging=BydApiClient.value(realtime,"isCharging","is_charging","chargingState","charging_state");
+        String online=BydApiClient.value(realtime,"onlineState","online_state","connectState","connect_state");
         batteryValue.setText(suffix(battery,"%")); rangeValue.setText(suffix(range," km")); odometerValue.setText(suffix(odo," km"));
         setSmallMetricValue(tempValue,suffix(temp,"°C"));
         setSmallMetricValue(lockValue,truthText(locked,"مقفلة","مفتوحة"));
         setSmallMetricValue(chargeValue,truthText(charging,"يشحن","غير مشحونة"));
+        if (cloudStateValue != null) setSmallMetricValue(cloudStateValue, vehicleConnectionText(online, realtime));
     }
 
     private void addAction(GridLayout grid,String icon,String title,String command,boolean danger){
@@ -455,22 +486,89 @@ public final class MainActivity extends Activity {
 
     private void startQrScan(){
         if(client==null){toast("سجل الدخول بحساب BYD أولاً");return;}
-        IntentIntegrator scanner=new IntentIntegrator(this);
-        scanner.setPrompt("وجّه الكاميرا إلى QR الظاهر على شاشة السيارة");
-        scanner.setBeepEnabled(false);
-        scanner.setOrientationLocked(true);
-        scanner.setBarcodeImageEnabled(false);
-        scanner.initiateScan();
-    }
-
-    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
-        IntentResult result=IntentIntegrator.parseActivityResult(requestCode,resultCode,data);
-        if(result!=null){
-            if(result.getContents()==null){toast("تم إلغاء مسح QR");}
-            else handleScannedQr(result.getContents());
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingQrAfterPermission = true;
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
             return;
         }
-        super.onActivityResult(requestCode,resultCode,data);
+        openInlineQrScanner();
+    }
+
+    private void openInlineQrScanner(){
+        try {
+            qrScannerOpen = true;
+            LinearLayout root = column();
+            root.setBackgroundColor(Color.BLACK);
+            root.setPadding(dp(14), dp(18), dp(14), dp(18));
+
+            LinearLayout top = new LinearLayout(this);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            TextView back = label("✕", 28, Color.WHITE, true);
+            back.setGravity(Gravity.CENTER);
+            back.setOnClickListener(v -> closeQrScanner());
+            top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
+            TextView title = label("مسح QR السيارة", 20, Color.WHITE, true);
+            title.setGravity(Gravity.RIGHT);
+            top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            root.addView(top, lpMatch(0, dp(10)));
+
+            TextView hint = label("وجّه الكاميرا إلى QR الظاهر على شاشة السيارة", 13, Color.LTGRAY, false);
+            hint.setGravity(Gravity.RIGHT);
+            root.addView(hint, lpMatch(0, dp(12)));
+
+            qrScannerView = new DecoratedBarcodeView(this);
+            qrScannerView.setStatusText("Car X • QR السيارة");
+            root.addView(qrScannerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+            qrScannerView.decodeSingle(new BarcodeCallback() {
+                @Override public void barcodeResult(BarcodeResult result) {
+                    if (result == null || result.getText() == null || result.getText().trim().isEmpty()) return;
+                    final String raw = result.getText();
+                    runOnUiThread(() -> {
+                        if (qrScannerView != null) {
+                            try { qrScannerView.pause(); } catch (Exception ignored) {}
+                        }
+                        qrScannerOpen = false;
+                        qrScannerView = null;
+                        showDashboard();
+                        handleScannedQr(raw);
+                    });
+                }
+                @Override public void possibleResultPoints(List<ResultPoint> resultPoints) {}
+            });
+
+            setContentView(root);
+            qrScannerView.resume();
+        } catch (Throwable t) {
+            qrScannerOpen = false;
+            qrScannerView = null;
+            showDashboard();
+            showError("ماسح QR", "تعذر فتح الكاميرا: " + readableError(t));
+        }
+    }
+
+    private void closeQrScanner(){
+        if (qrScannerView != null) {
+            try { qrScannerView.pause(); } catch (Exception ignored) {}
+        }
+        qrScannerOpen = false;
+        qrScannerView = null;
+        showDashboard();
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults){
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            if (granted && pendingQrAfterPermission) {
+                pendingQrAfterPermission = false;
+                openInlineQrScanner();
+            } else {
+                pendingQrAfterPermission = false;
+                showError("صلاحية الكاميرا", "لا يمكن مسح QR بدون السماح للكاميرا.");
+            }
+        }
     }
 
     private void handleScannedQr(String raw){
@@ -596,6 +694,17 @@ public final class MainActivity extends Activity {
     private String maskVin(String vin){if(vin==null||vin.length()<8)return vin;return vin.substring(0,4)+"••••"+vin.substring(vin.length()-4);}
     private String suffix(String v,String suffix){return v==null||v.isEmpty()||"—".equals(v)?"—":v+suffix;}
     private String truthText(String v,String yes,String no){if(v==null||"—".equals(v))return"—";String x=v.toLowerCase();return("true".equals(x)||"1".equals(x)||"on".equals(x)||"locked".equals(x))?yes:no;}
+    private String vehicleConnectionText(String raw, JSONObject payload){
+        String x = raw == null ? "" : raw.trim().toLowerCase();
+        if ("1".equals(x) || "online".equals(x) || "connected".equals(x)) return "متصلة";
+        if ("0".equals(x) || "offline".equals(x) || "disconnected".equals(x)) return "غير متصلة";
+        if (payload != null) {
+            boolean meaningful = payload.has("time") || payload.has("speed") || payload.has("elecPercent") || payload.has("enduranceMileage") || payload.has("totalMileage");
+            if (meaningful) return "بيانات متاحة";
+        }
+        return "غير معروف";
+    }
+
     private String controlResultText(JSONObject o){if(o==null)return"تم الإرسال";int state=o.optInt("controlState",-1),res=o.optInt("res",-1);if(state==1||res==2)return"تم التنفيذ بنجاح";if(state==2)return"رفضت السيارة الأمر";return o.optString("message","تم إرسال الأمر");}
     private String firstValue(JSONObject o,String...keys){if(o==null)return"";for(String k:keys){Object v=o.opt(k);if(v!=null&&!JSONObject.NULL.equals(v)){String s=String.valueOf(v);if(!s.isEmpty())return s;}}JSONObject data=o.optJSONObject("data");if(data!=null)return firstValue(data,keys);return"";}
     private String maskSecret(String s){if(s==null||s.length()<8)return"••••";return s.substring(0,3)+"••••"+s.substring(s.length()-3);}
