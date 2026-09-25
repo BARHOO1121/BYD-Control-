@@ -456,7 +456,6 @@ public final class MainActivity extends Activity {
     private void startQrScan(){
         if(client==null){toast("سجل الدخول بحساب BYD أولاً");return;}
         IntentIntegrator scanner=new IntentIntegrator(this);
-        scanner.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE_TYPES);
         scanner.setPrompt("وجّه الكاميرا إلى QR الظاهر على شاشة السيارة");
         scanner.setBeepEnabled(false);
         scanner.setOrientationLocked(true);
