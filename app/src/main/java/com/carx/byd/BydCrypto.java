@@ -65,6 +65,14 @@ public final class BydCrypto {
         return md5.substring(24, 32) + md5.substring(8, 16) + md5.substring(16, 24) + md5.substring(0, 8);
     }
 
+    public static String sha256Hex(String value) {
+        return digestHex("SHA-256", value == null ? "" : value).toLowerCase(Locale.ROOT);
+    }
+
+    public static String computeCnCheckcode(Map<String, Object> payload) {
+        return sha256Hex(JsonUtil.stringify(payload));
+    }
+
     public static String aesEncryptHex(String plaintext, String keyHex) {
         try {
             byte[] key = hexToBytes(keyHex);
