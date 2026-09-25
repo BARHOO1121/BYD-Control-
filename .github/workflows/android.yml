@@ -21,5 +21,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: CarX-BYD-Alpha2-China
+          name: CarX-BYD-Alpha4-QR-Themes
           path: app/build/outputs/apk/debug/app-debug.apk

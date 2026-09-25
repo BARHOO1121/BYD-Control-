@@ -101,6 +101,50 @@ public final class BydApiClient {
         return new JSONArray();
     }
 
+
+    /**
+     * BYD China QR login flow. The endpoint names and scan fields are taken from
+     * the working mainland BYD 9.16.1 app. This call only authorizes/inspects the
+     * scanned QR; the user is asked for confirmation before scanLoginByAction.
+     */
+    public JSONObject scanLoginByAuth(String qrRaw) throws Exception {
+        if(!config.isChina()) throw new BydException("مسح QR الخاص بالسيارة متاح لحساب BYD China فقط");
+        QrPayload q=QrPayload.parse(qrRaw);
+        if(q.raw.isEmpty()) throw new BydException("QR فارغ");
+        LinkedHashMap<String,String> inner=buildInnerBase(null,null);
+        inner.put("scanUrl",q.raw);
+        if(!q.scanId.isEmpty()) inner.put("scanId",q.scanId);
+        if(!q.innerToken.isEmpty()) inner.put("scanInnerToken",q.innerToken);
+        if(!q.vkey256.isEmpty()) inner.put("vkey256",q.vkey256);
+        if(!q.vin.isEmpty()) inner.put("vin",q.vin);
+        Object decoded=postTokenJson("/user/scanlogin/scanLoginByAuth",inner,null);
+        return asJsonObject(decoded);
+    }
+
+    public JSONObject scanLoginByAction(String scanId,String vin) throws Exception {
+        if(scanId==null||scanId.trim().isEmpty()) throw new BydException("لم يرجع BYD رقم جلسة QR");
+        LinkedHashMap<String,String> inner=buildInnerBase(null,null);
+        inner.put("scanId",scanId.trim());
+        // BYD uses a dedicated Action endpoint for the positive confirmation.
+        // The separate scanLoginCancel endpoint handles rejection/cancel.
+        if(vin!=null&&!vin.isEmpty()) inner.put("vin",vin);
+        Object decoded=postTokenJson("/user/scanlogin/scanLoginByAction",inner,null);
+        return asJsonObject(decoded);
+    }
+
+    public JSONObject scanLoginCancel(String scanId) throws Exception {
+        LinkedHashMap<String,String> inner=buildInnerBase(null,null);
+        if(scanId!=null&&!scanId.trim().isEmpty()) inner.put("scanId",scanId.trim());
+        Object decoded=postTokenJson("/user/scanlogin/scanLoginCancel",inner,null);
+        return asJsonObject(decoded);
+    }
+
+    private static JSONObject asJsonObject(Object decoded) throws Exception {
+        if(decoded instanceof JSONObject) return (JSONObject)decoded;
+        if(decoded instanceof JSONArray){JSONObject o=new JSONObject();o.put("items",decoded);return o;}
+        JSONObject o=new JSONObject();if(decoded!=null)o.put("value",String.valueOf(decoded));return o;
+    }
+
     public JSONObject getRealtime(String vin,int energyType)throws Exception{
         LinkedHashMap<String,String> trigger=buildInnerBase(vin,null);
         trigger.put("energyType",String.valueOf(energyType)); trigger.put("tboxVersion",config.tboxVersion);

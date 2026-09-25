@@ -1,40 +1,34 @@
-# Car X BYD — Android Alpha 2 China
+# Car X BYD — Alpha 4
 
-Native Android build of **Car X BYD Cloud** with a dedicated mainland-China authentication stack.
+Android prototype for BYD China Cloud with an Arabic-first Car X interface.
 
-## Alpha 2 changes
+## Alpha 4 highlights
 
-- Mainland China mode is the default.
-- Chinese phone accounts are supported; `+86` / `0086` is stripped locally before login.
-- China endpoint: `https://dilinksuperappserver-cn.byd.auto`.
-- China login endpoint: `/app/auth/login`.
-- Native WBSK white-box envelope codec for the mainland app flow.
-- WBSK golden-vector self-test runs **before credentials are sent**.
-- China request headers: `version`, `platform: ANDROID`, `BrandFlag: dynasty`.
-- China session handles `superId`, brand user id, `signToken`, and `encryToken` / `encryptToken`.
-- China vehicle list uses `/app/auth/getAllListByUserId`.
-- Overseas/global mode remains available for non-China accounts.
-- Android Keystore AES-GCM protects locally saved username/password/control PIN.
-- Realtime and remote-control foundation retained from Alpha 1.
+- Keeps the BYD China login/WBSK engine that was validated against a mainland BYD account.
+- Red/black premium theme is the default.
+- Built-in theme selector with four themes:
+  - Red Sport
+  - Black Gold
+  - Midnight Blue
+  - Luxury White
+- Arabic vehicle-name mapping, including `海鸥荣耀版` → `سيجل – الفئة الفاخرة`.
+- Vehicle hero artwork can use a model image returned by BYD when an HTTPS image URL is available; otherwise it falls back to the selected theme artwork.
+- Built-in QR camera scanner for the vehicle-screen login flow.
+- QR flow targets the mainland BYD scan-login endpoints found in the working BYD 9.16.1 app:
+  - `/user/scanlogin/scanLoginByAuth`
+  - `/user/scanlogin/scanLoginByAction`
+  - `/user/scanlogin/scanLoginCancel`
+- The QR server payload is still considered **beta** until tested against a live car QR. Do not share active QR values outside the device; they may contain temporary authentication material.
+- Entry for proximity unlock/lock-away is present in the UI, but automatic Bluetooth Digital Key behavior is deliberately not enabled until the vehicle-specific BLE protocol is verified.
 
-## Safety during testing
+## Security
 
-Do not repeatedly submit credentials after an authentication rejection. Alpha 2 validates the WBSK engine locally before making the BYD login request.
+Account credentials are stored locally using Android Keystore-backed encrypted preferences. Remote vehicle actions retain confirmation prompts for sensitive commands.
 
 ## Build
 
-Push to GitHub and run **Build Car X BYD APK**. The workflow produces the `CarX-BYD-Alpha2-China` artifact containing `app-debug.apk`.
+GitHub Actions builds the debug APK on pushes to `main`. The artifact name is `CarX-BYD-Alpha4-QR-Themes`.
 
-Configuration:
-- minSdk 26
-- targetSdk 35
-- Java 17
-- no AndroidX/runtime third-party dependencies
+## Important
 
-## Sources / interoperability references
-
-- `jkaberg/pyBYD` — MIT, overseas protocol/session behavior and public CN design work.
-- `jkaberg/hass-byd-vehicle` — MIT, region/capability reference.
-- Public BYD-re CN interoperability research was consulted for the CN wire format and WBSK test vectors.
-
-Car X app code is a native Android implementation.
+This is an independent interoperability project and is not an official BYD application. BYD trademarks and vehicle imagery belong to their respective owners.
