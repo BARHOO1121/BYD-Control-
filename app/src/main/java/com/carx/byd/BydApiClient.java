@@ -117,8 +117,12 @@ public final class BydApiClient {
         if(!q.innerToken.isEmpty()) inner.put("scanInnerToken",q.innerToken);
         if(!q.vkey256.isEmpty()) inner.put("vkey256",q.vkey256);
         if(!q.vin.isEmpty()) inner.put("vin",q.vin);
-        Object decoded=postTokenJson("/user/scanlogin/scanLoginByAuth",inner,null);
-        return asJsonObject(decoded);
+        try {
+            Object decoded=postTokenJson("/user/scanlogin/scanLoginByAuth",inner,null);
+            return asJsonObject(decoded);
+        } catch (BydException e) {
+            throw new BydException(e.getMessage()+"\nQR shape: "+q.safeShape());
+        }
     }
 
     public JSONObject scanLoginByAction(String scanId,String vin) throws Exception {
@@ -226,7 +230,15 @@ public final class BydApiClient {
             LinkedHashMap<String,String> sf=new LinkedHashMap<>(inner);sf.put("countryCode",config.region.countryCode);sf.put("identifier",session.userId);sf.put("imeiMD5",config.imeiMd5());sf.put("language",config.region.language);sf.put("reqTimestamp",ts);String sign=BydCrypto.sha1Mixed(BydCrypto.buildSignString(sf,signKey));
             o.put("countryCode",config.region.countryCode);o.put("encryData",enc);o.put("identifier",session.userId);o.put("imeiMD5",config.imeiMd5());o.put("language",config.region.language);o.put("reqTimestamp",ts);o.put("sign",sign);addOverseasDevice(o);o.put("checkcode",BydCrypto.computeCheckcode(o));
         }
-        JSONObject response=postSecure(endpoint,o);String code=response.optString("code","");if(!"0".equals(code)){if(allowReauth&&("1002".equals(code)||"1005".equals(code)||"1010".equals(code))){session=null;login();return postTokenJson(endpoint,inner,vin,false);}throw new BydException("BYD "+code+": "+response.optString("message","API error"));}
+        JSONObject response=postSecure(endpoint,o);
+        String code=response.optString("code","");
+        boolean qrEndpoint=endpoint.contains("/scanlogin/")||endpoint.contains("/scanLoginWatch/");
+        if(code.isEmpty() && qrEndpoint && response.has("respondData") && !response.optString("respondData","").isEmpty()) code="0";
+        if(!"0".equals(code)){
+            if(allowReauth&&("1002".equals(code)||"1005".equals(code)||"1010".equals(code))){session=null;login();return postTokenJson(endpoint,inner,vin,false);}
+            if(qrEndpoint) throw new BydException("BYD QR: "+safeResponseSummary(response));
+            throw new BydException("BYD "+code+": "+response.optString("message",response.optString("msg","API error")));
+        }
         String rd=response.optString("respondData","");if(rd.isEmpty())return new JSONObject();String plain=BydCrypto.aesDecryptUtf8(rd,contentKey).trim();if(plain.isEmpty())return new JSONObject();return new JSONTokener(plain).nextValue();
     }
 
@@ -247,6 +259,25 @@ public final class BydApiClient {
     private static void ensureCodeOk(String endpoint,JSONObject r)throws BydException{if(!"0".equals(r.optString("code","")))throw new BydException(endpoint+" → "+r.optString("code")+" "+r.optString("message"));}
     private static boolean looksLikeRealtime(JSONObject o){return o.has("elecPercent")||o.has("enduranceMileage")||o.has("totalMileage")||o.has("vehicleState")||o.has("speed");}
     private static boolean isTerminalControl(JSONObject o){if(o.has("controlState"))return o.optInt("controlState",0)!=0;if(o.has("res"))return o.optInt("res",0)>=2;return o.has("result");}
+    private static String safeResponseSummary(JSONObject r){
+        StringBuilder b=new StringBuilder();
+        String[] keys={"code","message","msg","retCode","resultCode","status","success","errorCode","errorMsg"};
+        for(String k:keys){
+            if(!r.has(k)||r.isNull(k))continue;
+            Object v=r.opt(k);
+            if(v instanceof JSONObject||v instanceof JSONArray)continue;
+            String s=String.valueOf(v);
+            if(s.length()>160)s=s.substring(0,160);
+            if(b.length()>0)b.append(" | ");
+            b.append(k).append("=").append(s);
+        }
+        JSONArray names=r.names();
+        if(names!=null){if(b.length()>0)b.append(" | ");b.append("fields=").append(names.toString());}
+        if(r.has("respondData")){if(b.length()>0)b.append(" | ");b.append("respondData=").append(r.optString("respondData","").isEmpty()?"empty":"present");}
+        if(b.length()==0)b.append("empty response metadata");
+        return trim(b.toString(),900);
+    }
+
     private static String randomHex(int n){byte[] b=new byte[n];RNG.nextBytes(b);return BydCrypto.bytesToHex(b,true);}
     private static String readText(InputStream in)throws Exception{if(in==null)return"";StringBuilder b=new StringBuilder();try(BufferedReader r=new BufferedReader(new InputStreamReader(in,StandardCharsets.UTF_8))){String line;while((line=r.readLine())!=null)b.append(line);}return b.toString();}
     private static String trim(String s,int n){return s==null?"":(s.length()<=n?s:s.substring(0,n));}
