@@ -61,7 +61,7 @@ public final class BydApiClient {
         String userId=token.optString("userId","");
         String signToken=token.optString("signToken","");
         String encryToken=token.optString("encryToken", token.optString("encryptToken",""));
-        if(userId.isEmpty()||signToken.isEmpty()||encryToken.isEmpty()) throw new BydException("BYD login token is incomplete");
+        if(userId.isEmpty()||signToken.isEmpty()||encryToken.isEmpty()) throw new BydException(BydException.Kind.AUTH_RESPONSE,null);
         session=new BydSession(userId,signToken,encryToken);
         return session;
     }
@@ -77,28 +77,33 @@ public final class BydApiClient {
         JSONObject rel=token.optJSONObject("superBindRelationDtoMap");
         if(rel!=null){ JSONObject b=rel.optJSONObject(config.targetBrand); if(b!=null) brandUserId=b.optString("userId",""); }
         String userId=!brandUserId.isEmpty()?brandUserId:superId;
-        if(userId.isEmpty()||signToken.isEmpty()||encryToken.isEmpty()) throw new BydException("BYD China login token is incomplete");
+        if(userId.isEmpty()||signToken.isEmpty()||encryToken.isEmpty()) throw new BydException(BydException.Kind.AUTH_RESPONSE,null);
         session=new BydSession(userId,superId,signToken,encryToken);
         return session;
     }
 
     private JSONObject decryptLoginToken(JSONObject response) throws Exception {
         String rd=response.optString("respondData","");
-        if(rd.isEmpty()) throw new BydException("BYD login response missing respondData");
+        if(rd.isEmpty()) throw new BydException(BydException.Kind.AUTH_RESPONSE,null);
         String plain=BydCrypto.aesDecryptUtf8(rd,BydCrypto.pwdLoginKey(config.password));
         JSONObject inner=new JSONObject(plain);
         JSONObject token=inner.optJSONObject("token");
-        if(token==null) throw new BydException("BYD login response missing token");
+        if(token==null) throw new BydException(BydException.Kind.AUTH_RESPONSE,null);
         return token;
     }
 
-    public JSONArray getVehicles() throws Exception {
+    public VehicleListResult getVehicleList() throws Exception {
         LinkedHashMap<String,String> inner=config.isChina()?buildChinaVehicleListInner():buildInnerBase(null,null);
         String endpoint=config.isChina()?"/app/auth/getAllListByUserId":"/app/account/getAllListByUserId";
         Object decoded=postTokenJson(endpoint,inner,null);
-        if(decoded instanceof JSONArray) return (JSONArray)decoded;
-        if(decoded instanceof JSONObject){ JSONArray a=((JSONObject)decoded).optJSONArray("diLinkAutoInfoList"); if(a!=null)return a; }
-        return new JSONArray();
+        return VehicleListParser.parse(decoded);
+    }
+
+    /** Compatibility entry point: an unknown response must not masquerade as an empty list. */
+    public JSONArray getVehicles() throws Exception {
+        VehicleListResult result=getVehicleList();
+        if(!result.isRecognized()) throw new BydException(BydException.Kind.VEHICLE_FORMAT, null);
+        return result.vehicles;
     }
 
 
@@ -117,15 +122,12 @@ public final class BydApiClient {
         if(!q.innerToken.isEmpty()) inner.put("scanInnerToken",q.innerToken);
         if(!q.vkey256.isEmpty()) inner.put("vkey256",q.vkey256);
         if(!q.vin.isEmpty()) inner.put("vin",q.vin);
-        try {
-            Object decoded=postTokenJson("/user/scanlogin/scanLoginByAuth",inner,null);
-            return asJsonObject(decoded);
-        } catch (BydException e) {
-            throw new BydException(e.getMessage()+"\nQR shape: "+q.safeShape());
-        }
+        Object decoded=postTokenJson("/user/scanlogin/scanLoginByAuth",inner,null);
+        return asJsonObject(decoded);
     }
 
     public JSONObject scanLoginByAction(String scanId,String vin) throws Exception {
+        if(!config.isChina()) throw new BydException("QR السيارة متاح لحساب BYD China فقط");
         if(scanId==null||scanId.trim().isEmpty()) throw new BydException("لم يرجع BYD رقم جلسة QR");
         LinkedHashMap<String,String> inner=buildInnerBase(null,null);
         inner.put("scanId",scanId.trim());
@@ -137,6 +139,7 @@ public final class BydApiClient {
     }
 
     public JSONObject scanLoginCancel(String scanId) throws Exception {
+        if(!config.isChina()) throw new BydException("QR السيارة متاح لحساب BYD China فقط");
         LinkedHashMap<String,String> inner=buildInnerBase(null,null);
         if(scanId!=null&&!scanId.trim().isEmpty()) inner.put("scanId",scanId.trim());
         Object decoded=postTokenJson("/user/scanlogin/scanLoginCancel",inner,null);
@@ -232,19 +235,50 @@ public final class BydApiClient {
         }
         JSONObject response=postSecure(endpoint,o);
         String code=response.optString("code","");
-        boolean qrEndpoint=endpoint.contains("/scanlogin/")||endpoint.contains("/scanLoginWatch/");
-        if(code.isEmpty() && qrEndpoint && response.has("respondData") && !response.optString("respondData","").isEmpty()) code="0";
-        if(!"0".equals(code)){
-            if(allowReauth&&("1002".equals(code)||"1005".equals(code)||"1010".equals(code))){session=null;login();return postTokenJson(endpoint,inner,vin,false);}
-            if(qrEndpoint) throw new BydException("BYD QR: "+safeResponseSummary(response));
-            throw new BydException("BYD "+code+": "+response.optString("message",response.optString("msg","API error")));
+        if(!BydResponsePolicy.isAccepted(response)){
+            boolean expired=BydResponsePolicy.isExpired(code);
+            if(allowReauth&&expired){session=null;login();return postTokenJson(endpoint,inner,vin,false);}
+            throw new BydException(expired?BydException.Kind.SESSION:BydException.Kind.API_REJECTED,code);
         }
-        String rd=response.optString("respondData","");if(rd.isEmpty())return new JSONObject();String plain=BydCrypto.aesDecryptUtf8(rd,contentKey).trim();if(plain.isEmpty())return new JSONObject();return new JSONTokener(plain).nextValue();
+        boolean vehicleListEndpoint=endpoint.endsWith("/getAllListByUserId");
+        String rd=response.optString("respondData","");
+        if(rd.isEmpty()) {
+            if(vehicleListEndpoint)throw new BydException(BydException.Kind.EMPTY_RESPONSE,null);
+            return new JSONObject();
+        }
+        String plain;
+        try { plain=BydCrypto.aesDecryptUtf8(rd,contentKey).trim(); }
+        catch(Exception failure){throw new BydException(BydException.Kind.DECRYPTION,null);}
+        if(plain.isEmpty()) {
+            if(vehicleListEndpoint)throw new BydException(BydException.Kind.EMPTY_RESPONSE,null);
+            return new JSONObject();
+        }
+        try {
+            JSONTokener tokener=new JSONTokener(plain);
+            Object decoded=tokener.nextValue();
+            if(tokener.nextClean()!=0)throw new BydException(BydException.Kind.RESPONSE,null);
+            return decoded;
+        } catch(org.json.JSONException failure){throw new BydException(BydException.Kind.RESPONSE,null);}
     }
 
     private JSONObject postSecure(String endpoint,LinkedHashMap<String,Object> outer)throws Exception{
         String encoded=config.isChina()?wbsk.encodeEnvelope(JsonUtil.stringify(outer)):bangcle.encodeEnvelope(JsonUtil.stringify(outer));LinkedHashMap<String,Object> bodyMap=new LinkedHashMap<>();bodyMap.put("request",encoded);byte[] body=JsonUtil.stringify(bodyMap).getBytes(StandardCharsets.UTF_8);URL url=new URL(config.region.baseUrl+endpoint);URI uri=url.toURI();HttpURLConnection c=(HttpURLConnection)url.openConnection();c.setRequestMethod("POST");c.setDoOutput(true);c.setConnectTimeout(20_000);c.setReadTimeout(35_000);c.setRequestProperty("accept-encoding","identity");c.setRequestProperty("content-type","application/json; charset=UTF-8");c.setRequestProperty("user-agent","okhttp/4.12.0");if(config.isChina()){c.setRequestProperty("version",config.cnAppInnerVersion);c.setRequestProperty("platform","ANDROID");c.setRequestProperty("BrandFlag",config.brandFlag);}for(Map.Entry<String,List<String>> e:cookies.get(uri,Collections.emptyMap()).entrySet())for(String v:e.getValue())c.addRequestProperty(e.getKey(),v);
-        try{try(OutputStream out=c.getOutputStream()){out.write(body);}int status=c.getResponseCode();cookies.put(uri,c.getHeaderFields());InputStream stream=status>=200&&status<400?c.getInputStream():c.getErrorStream();String text=readText(stream);if(status!=200)throw new BydException("HTTP "+status+" من BYD: "+trim(text,180));JSONObject wrapper=new JSONObject(text);String env=wrapper.optString("response","");if(env.isEmpty())throw new BydException("BYD response missing envelope");String decoded=config.isChina()?wbsk.decodeEnvelope(env).trim():bangcle.decodeEnvelope(env).trim();if(decoded.startsWith("F{")||decoded.startsWith("F["))decoded=decoded.substring(1);return new JSONObject(decoded);}finally{c.disconnect();}
+        try {
+            try(OutputStream out=c.getOutputStream()){out.write(body);}
+            int status=c.getResponseCode();
+            cookies.put(uri,c.getHeaderFields());
+            // Never echo an HTTP body, server message, URL or decrypted response.
+            if(status!=200)throw new BydException(BydException.Kind.HTTP,String.valueOf(status));
+            String text=readText(c.getInputStream());
+            try {
+                JSONObject wrapper=new JSONObject(text);
+                String env=wrapper.optString("response","");
+                if(env.isEmpty())throw new BydException(BydException.Kind.RESPONSE,null);
+                String decoded=config.isChina()?wbsk.decodeEnvelope(env).trim():bangcle.decodeEnvelope(env).trim();
+                if(decoded.startsWith("F{")||decoded.startsWith("F["))decoded=decoded.substring(1);
+                return new JSONObject(decoded);
+            } catch(org.json.JSONException failure){throw new BydException(BydException.Kind.RESPONSE,null);}
+        } finally { c.disconnect(); }
     }
 
     private void addOverseasDevice(LinkedHashMap<String,Object> o){
@@ -256,33 +290,44 @@ public final class BydApiClient {
         o.put("ostype",config.ostype);o.put("imei",config.imei);o.put("mac",config.mac);o.put("model",config.model);o.put("sdk",config.sdk);o.put("serviceTime",String.valueOf(System.currentTimeMillis()));o.put("mod",config.mod);
     }
     private static LinkedHashMap<String,String> stringify(Map<String,Object> m){LinkedHashMap<String,String> o=new LinkedHashMap<>();for(Map.Entry<String,Object> e:m.entrySet())o.put(e.getKey(),e.getValue()==null?null:String.valueOf(e.getValue()));return o;}
-    private static void ensureCodeOk(String endpoint,JSONObject r)throws BydException{if(!"0".equals(r.optString("code","")))throw new BydException(endpoint+" → "+r.optString("code")+" "+r.optString("message"));}
+    private static void ensureCodeOk(String endpoint,JSONObject r)throws BydException{if(!BydResponsePolicy.isAccepted(r))throw new BydException(BydException.Kind.AUTH,r.optString("code",""));}
     private static boolean looksLikeRealtime(JSONObject o){return o.has("elecPercent")||o.has("enduranceMileage")||o.has("totalMileage")||o.has("vehicleState")||o.has("speed");}
     private static boolean isTerminalControl(JSONObject o){if(o.has("controlState"))return o.optInt("controlState",0)!=0;if(o.has("res"))return o.optInt("res",0)>=2;return o.has("result");}
-    private static String safeResponseSummary(JSONObject r){
-        StringBuilder b=new StringBuilder();
-        String[] keys={"code","message","msg","retCode","resultCode","status","success","errorCode","errorMsg"};
-        for(String k:keys){
-            if(!r.has(k)||r.isNull(k))continue;
-            Object v=r.opt(k);
-            if(v instanceof JSONObject||v instanceof JSONArray)continue;
-            String s=String.valueOf(v);
-            if(s.length()>160)s=s.substring(0,160);
-            if(b.length()>0)b.append(" | ");
-            b.append(k).append("=").append(s);
-        }
-        JSONArray names=r.names();
-        if(names!=null){if(b.length()>0)b.append(" | ");b.append("fields=").append(names.toString());}
-        if(r.has("respondData")){if(b.length()>0)b.append(" | ");b.append("respondData=").append(r.optString("respondData","").isEmpty()?"empty":"present");}
-        if(b.length()==0)b.append("empty response metadata");
-        return trim(b.toString(),900);
-    }
-
     private static String randomHex(int n){byte[] b=new byte[n];RNG.nextBytes(b);return BydCrypto.bytesToHex(b,true);}
     private static String readText(InputStream in)throws Exception{if(in==null)return"";StringBuilder b=new StringBuilder();try(BufferedReader r=new BufferedReader(new InputStreamReader(in,StandardCharsets.UTF_8))){String line;while((line=r.readLine())!=null)b.append(line);}return b.toString();}
-    private static String trim(String s,int n){return s==null?"":(s.length()<=n?s:s.substring(0,n));}
 
     public static String value(JSONObject o,String...names){for(String n:names)if(o.has(n)&&!o.isNull(n))return String.valueOf(o.opt(n));return"—";}
     public static int energyType(JSONObject v){Object o=v.opt("energyType");if(o==null)o=v.opt("energy_type");try{return Integer.parseInt(String.valueOf(o));}catch(Exception e){return 0;}}
-    public static final class BydException extends Exception{public BydException(String m){super(m);}}
+    public static final class BydException extends Exception {
+        public enum Kind { LOCAL, AUTH, AUTH_RESPONSE, SESSION, API_REJECTED, HTTP, RESPONSE, EMPTY_RESPONSE, DECRYPTION, VEHICLE_FORMAT }
+        public final Kind kind;
+        private final String safeMessage;
+
+        public BydException(String message) {
+            super(message);
+            kind=Kind.LOCAL;
+            safeMessage="تعذر إكمال طلب BYD. تحقق من إعدادات الحساب وPIN التحكم. [BYD_LOCAL]";
+        }
+
+        public BydException(Kind kind,String code) {
+            super(kind.name());
+            this.kind=kind;
+            String message;
+            switch(kind) {
+                case AUTH: message="لم يكتمل تسجيل الدخول أو إعادة التحقق من الحساب.";break;
+                case AUTH_RESPONSE: message="رد تسجيل الدخول غير مكتمل؛ لم يتم اعتماد جلسة الحساب.";break;
+                case SESSION: message="انتهت جلسة الحساب أو رفض الخادم تجديدها. سجل الدخول مجدداً.";break;
+                case API_REJECTED: message="رفض خادم BYD الطلب أو أعاد حالة غير معروفة.";break;
+                case HTTP: message="أعاد خادم BYD خطأ اتصال HTTP.";break;
+                case EMPTY_RESPONSE: message="قبل BYD الطلب لكنه لم يُرجع بيانات قائمة السيارات؛ تعذر تحديد السيارات المرتبطة.";break;
+                case DECRYPTION: message="تعذر فك رد BYD المشفر أو التحقق منه.";break;
+                case VEHICLE_FORMAT: message="صيغة قائمة السيارات غير مدعومة؛ لا يمكن استنتاج أن الحساب بلا سيارة.";break;
+                default: message="رد BYD غير مكتمل أو تعذرت قراءته.";
+            }
+            String safeCode=kind==Kind.HTTP && code!=null && code.matches("[1-5][0-9]{2}")?code:SafeDiagnostics.responseCode(code);
+            safeMessage=message+" [BYD_"+kind.name()+"; code="+safeCode+"]";
+        }
+
+        public String safeMessage() { return safeMessage; }
+    }
 }
