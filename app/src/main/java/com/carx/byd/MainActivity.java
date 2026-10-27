@@ -3,6 +3,8 @@ package com.carx.byd;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -51,14 +53,17 @@ public final class MainActivity extends Activity {
     private JSONArray vehicles = new JSONArray();
     private JSONObject currentVehicle;
     private JSONObject realtime = new JSONObject();
+    private boolean accountAuthenticated;
+    private boolean accountRequestInFlight;
+    private VehicleListResult vehicleListResult;
+    private Exception vehicleListFailure;
+    private boolean qrConfirmedThisSession;
 
     private TextView globalStatus;
     private ProgressBar globalProgress;
     private TextView batteryValue, rangeValue, odometerValue, lockValue, tempValue, chargeValue, vinValue, modelValue, cloudStateValue;
     private Spinner vehicleSpinner;
     private ImageView heroCarArt;
-    private String lastQrScanId = "";
-    private String lastQrVin = "";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
     private DecoratedBarcodeView qrScannerView;
     private boolean qrScannerOpen = false;
@@ -141,7 +146,7 @@ public final class MainActivity extends Activity {
         TextView headline = label("دخول حساب BYD China", 28, theme.text, true);
         headline.setGravity(Gravity.RIGHT);
         root.addView(headline);
-        TextView desc = label("نفس محرك تسجيل الدخول الصيني الذي تم اختباره بنجاح، مع واجهة Car X الجديدة.", 13, theme.muted, false);
+        TextView desc = label("دخول الحساب وجلب السيارات خطوتان منفصلتان. اختر منطقة حسابك في BYD.", 13, theme.muted, false);
         desc.setGravity(Gravity.RIGHT);
         desc.setLineSpacing(dp(3), 1f);
         root.addView(desc, lpMatch(dp(7), dp(22)));
@@ -204,6 +209,7 @@ public final class MainActivity extends Activity {
         root.addView(themeHint, lpMatch(dp(10),0));
 
         login.setOnClickListener(v -> {
+            if (accountRequestInFlight) return;
             String u = username.getText().toString().trim();
             String p = password.getText().toString();
             String cp = pin.getText().toString().trim();
@@ -225,26 +231,141 @@ public final class MainActivity extends Activity {
             securePrefs.put("region", region.countryCode);
             config = new BydConfig(u,p,cp,region);
             client = new BydApiClient(this, config);
+            final BydApiClient requestClient = client;
+            accountAuthenticated = false;
+            accountRequestInFlight = true;
+            qrConfirmedThisSession = false;
+            vehicles = new JSONArray();
+            currentVehicle = null;
+            vehicleListResult = null;
+            vehicleListFailure = null;
+            login.setEnabled(false);
             setBusy(true, "تهيئة الاتصال المشفّر…");
             worker.execute(() -> {
-                try {
-                    client.prepare(text -> runOnUiThread(() -> setStatus(text)));
-                    runOnUiThread(() -> setStatus("تسجيل الدخول إلى BYD China…"));
-                    client.login();
-                    runOnUiThread(() -> setStatus("جلب السيارات المرتبطة بالحساب…"));
-                    vehicles = client.getVehicles();
-                    if (vehicles.length() == 0) throw new BydApiClient.BydException("لم يعثر BYD على سيارات مرتبطة بهذا الحساب");
-                    currentVehicle = vehicles.getJSONObject(0);
-                    runOnUiThread(() -> {
-                        setBusy(false, "تم الاتصال بنجاح");
-                        showDashboard();
-                    });
-                } catch (Exception e) {
-                    runOnUiThread(() -> { setBusy(false, "فشل الاتصال"); showError("تعذر تسجيل الدخول", readableError(e)); });
-                }
+                AccountVehicleLoader.Outcome outcome = AccountVehicleLoader.load(new AccountVehicleLoader.Source() {
+                    public void prepare() throws Exception { requestClient.prepare(text -> runOnUiThread(() -> setStatus(text))); }
+                    public void login() throws Exception {
+                        runOnUiThread(() -> setStatus("تسجيل الدخول إلى حساب BYD…"));
+                        requestClient.login();
+                    }
+                    public VehicleListResult fetchVehicles() throws Exception {
+                        runOnUiThread(() -> setStatus("نجح الدخول — جارٍ جلب قائمة السيارات…"));
+                        return requestClient.getVehicleList();
+                    }
+                });
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || client != requestClient) return;
+                    accountRequestInFlight = false;
+                    login.setEnabled(true);
+                    accountAuthenticated = outcome.authenticated;
+                    if (outcome.authenticated) {
+                        applyVehicleList(outcome.vehicleResult, outcome.failure);
+                    } else {
+                        setBusy(false, outcome.stage == AccountVehicleLoader.Stage.PREPARE ? "تعذر تهيئة الاتصال" : "لم يكتمل تسجيل الدخول");
+                        showError(outcome.stage == AccountVehicleLoader.Stage.PREPARE ? "تهيئة الاتصال" : "تسجيل الدخول",
+                                readableError(outcome.failure) + "\nالمرحلة: " + outcome.stage.name());
+                    }
+                });
             });
         });
         setContentView(scroll);
+    }
+
+    private void applyVehicleList(VehicleListResult result, Exception failure) {
+        vehicleListResult = result;
+        vehicleListFailure = failure;
+        vehicles = result != null && result.status == VehicleListResult.Status.LOADED ? result.vehicles : new JSONArray();
+        currentVehicle = vehicles.optJSONObject(0);
+        realtime = new JSONObject();
+        setBusy(false, currentVehicle == null ? "نجح الدخول — راجع حالة قائمة السيارات" : "تم جلب قائمة السيارات");
+        showAccountHome();
+    }
+
+    private void showAccountHome() {
+        if (!accountAuthenticated || client == null) { showLogin(); return; }
+        if (currentVehicle == null) showVehicleListState();
+        else showDashboard();
+    }
+
+    private String vehicleDiagnostics() {
+        String result = vehicleListResult == null ? "VL_REQUEST_FAILED\n" + readableError(vehicleListFailure) : vehicleListResult.safeSummary();
+        return "Car X BYD " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")\n"
+                + "login=accepted; stage=VEHICLES; region=" + config.region.countryCode + "\n" + result;
+    }
+
+    private void showVehicleListState() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(theme.bg);
+        LinearLayout root = column();
+        root.setPadding(dp(22), dp(28), dp(22), dp(28));
+        scroll.addView(root, matchWrap());
+        root.addView(label("حساب BYD — نجح تسجيل الدخول", 22, theme.green, true), lpMatch(0, dp(18)));
+        String message = vehicleListResult == null
+                ? "نجح تسجيل الدخول، لكن تعذر إكمال طلب قائمة السيارات. لا يمكن تحديد ارتباط السيارة من هذا الخطأ.\n" + readableError(vehicleListFailure)
+                : vehicleListResult.userMessage();
+        root.addView(label(message, 16, theme.text, false), lpMatch(0, dp(20)));
+
+        globalProgress = new ProgressBar(this);
+        globalProgress.setVisibility(View.GONE);
+        root.addView(globalProgress, new LinearLayout.LayoutParams(dp(30), dp(30)));
+        globalStatus = label("يمكن إعادة الطلب بنفس جلسة الحساب", 12, theme.muted, false);
+        root.addView(globalStatus, lpMatch(dp(8), dp(15)));
+        Button retry = primaryButton("إعادة جلب السيارات");
+        retry.setOnClickListener(v -> retryVehicleList(retry));
+        root.addView(retry, lpMatch(0, dp(12)));
+
+        if (config.isChina()) {
+            Button qr = ghostButton("مسح QR شاشة السيارة");
+            qr.setOnClickListener(v -> { if (!accountRequestInFlight) startQrScan(); });
+            root.addView(qr, lpMatch(0, dp(12)));
+        }
+        root.addView(label("تأكيد QR على الشاشة لا يثبت ربط ملكية السيارة بالحساب.", 11, theme.muted, false), lpMatch(0, dp(15)));
+        TextView diagnostics = label(vehicleDiagnostics(), 11, theme.muted2, false);
+        diagnostics.setTextDirection(View.TEXT_DIRECTION_LTR);
+        root.addView(diagnostics, lpMatch(0, dp(8)));
+        Button copy = ghostButton("نسخ التشخيص الآمن");
+        copy.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Car X diagnostics", vehicleDiagnostics()));
+            toast("تم نسخ التشخيص بدون بيانات الحساب أو السيارة");
+        });
+        root.addView(copy, lpMatch(0, dp(12)));
+        Button logout = ghostButton("تسجيل الخروج / تغيير المنطقة");
+        logout.setOnClickListener(v -> { if (!accountRequestInFlight) logout(); });
+        root.addView(logout, lpMatch(0, 0));
+        setContentView(scroll);
+    }
+
+    private void retryVehicleList(Button retry) {
+        if (client == null || !accountAuthenticated || accountRequestInFlight) return;
+        final BydApiClient requestClient = client;
+        accountRequestInFlight = true;
+        retry.setEnabled(false);
+        setBusy(true, "إعادة طلب قائمة السيارات…");
+        worker.execute(() -> {
+            VehicleListResult result = null;
+            Exception failure = null;
+            try { result = requestClient.getVehicleList(); } catch (Exception e) { failure = e; }
+            final VehicleListResult parsed = result;
+            final Exception error = failure;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || client != requestClient) return;
+                accountRequestInFlight = false;
+                applyVehicleList(parsed, error);
+            });
+        });
+    }
+
+    private void logout() {
+        client = null;
+        accountAuthenticated = false;
+        qrConfirmedThisSession = false;
+        vehicles = new JSONArray();
+        currentVehicle = null;
+        realtime = new JSONObject();
+        vehicleListResult = null;
+        vehicleListFailure = null;
+        showLogin();
     }
 
     // ---------------------------------------------------------------------
@@ -252,6 +373,7 @@ public final class MainActivity extends Activity {
     // ---------------------------------------------------------------------
 
     private void showDashboard() {
+        if (currentVehicle == null) { showAccountHome(); return; }
         applySystemBars();
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(theme.bg);
@@ -394,7 +516,7 @@ public final class MainActivity extends Activity {
         nav.addView(navItem("▦","المزيد",false,()->showSettings()),new LinearLayout.LayoutParams(0,dp(64),1));
         root.addView(nav,lpMatch(dp(14),dp(8)));
 
-        TextView legal=label("Car X BYD • Alpha 4.1 • China Cloud • Dev _ Ibraheem",9,theme.muted2,false);
+        TextView legal=label("Car X BYD • " + BuildConfig.VERSION_NAME + " • Dev ( Ibraheem )",9,theme.muted2,false);
         legal.setGravity(Gravity.CENTER);root.addView(legal);
 
         setContentView(scroll);
@@ -485,7 +607,9 @@ public final class MainActivity extends Activity {
     // ---------------------------------------------------------------------
 
     private void startQrScan(){
-        if(client==null){toast("سجل الدخول بحساب BYD أولاً");return;}
+        if(client==null || !accountAuthenticated){toast("سجل الدخول بحساب BYD أولاً");return;}
+        if(!config.isChina()){toast("QR شاشة السيارة متاح حالياً لحساب BYD China");return;}
+        if(accountRequestInFlight)return;
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             pendingQrAfterPermission = true;
             requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
@@ -531,7 +655,7 @@ public final class MainActivity extends Activity {
                         }
                         qrScannerOpen = false;
                         qrScannerView = null;
-                        showDashboard();
+                        showAccountHome();
                         handleScannedQr(raw);
                     });
                 }
@@ -543,7 +667,7 @@ public final class MainActivity extends Activity {
         } catch (Throwable t) {
             qrScannerOpen = false;
             qrScannerView = null;
-            showDashboard();
+            showAccountHome();
             showError("ماسح QR", "تعذر فتح الكاميرا: " + readableError(t));
         }
     }
@@ -554,7 +678,7 @@ public final class MainActivity extends Activity {
         }
         qrScannerOpen = false;
         qrScannerView = null;
-        showDashboard();
+        showAccountHome();
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults){
@@ -572,48 +696,70 @@ public final class MainActivity extends Activity {
     }
 
     private void handleScannedQr(String raw){
+        if(client==null || !accountAuthenticated || accountRequestInFlight)return;
+        final BydApiClient requestClient=client;
         QrPayload parsed=QrPayload.parse(raw);
+        accountRequestInFlight=true;
         setBusy(true,"التحقق من QR مع BYD China…");
         worker.execute(()->{
             try{
-                JSONObject auth=client.scanLoginByAuth(raw);
+                JSONObject auth=requestClient.scanLoginByAuth(raw);
                 String scanId=firstValue(auth,"scanId","scan_id","id");
                 if(scanId.isEmpty())scanId=parsed.scanId;
                 String vin=firstValue(auth,"vin","carVin","vehicleVin","scanVin");
                 if(vin.isEmpty())vin=parsed.vin;
                 final String finalScanId=scanId;
                 final String finalVin=vin;
+                if(finalScanId.isEmpty())throw new BydApiClient.BydException(BydApiClient.BydException.Kind.RESPONSE,null);
                 runOnUiThread(()->{
+                    if(isFinishing() || isDestroyed() || client!=requestClient)return;
+                    accountRequestInFlight=false;
                     setBusy(false,"QR صالح — بانتظار التأكيد");
-                    lastQrScanId=finalScanId;lastQrVin=finalVin;
                     String msg="تمت قراءة QR والتحقق منه مع BYD.";
-                    if(!finalVin.isEmpty())msg+="\n\nVIN: "+finalVin;
-                    if(!finalScanId.isEmpty())msg+="\nجلسة QR: "+maskSecret(finalScanId);
                     msg+="\n\nهل تريد تأكيد تسجيل الدخول على شاشة السيارة؟";
                     new AlertDialog.Builder(this).setTitle("تأكيد QR السيارة").setMessage(msg)
-                            .setNegativeButton("إلغاء",(d,w)->cancelQrQuietly(finalScanId))
-                            .setPositiveButton("تأكيد",(d,w)->confirmQr(finalScanId,finalVin)).show();
+                            .setNegativeButton("إلغاء",(d,w)->{if(client==requestClient)cancelQrQuietly(finalScanId);})
+                            .setOnCancelListener(d->{if(client==requestClient)cancelQrQuietly(finalScanId);})
+                            .setPositiveButton("تأكيد",(d,w)->{if(client==requestClient)confirmQr(finalScanId,finalVin);}).show();
                 });
             }catch(Exception e){
-                runOnUiThread(()->{setBusy(false,"فشل التحقق من QR");showError("QR السيارة",readableError(e)+"\n\nتمت إضافة مسارات BYD الأصلية: scanLoginByAuth / scanLoginByAction. إذا ظهر كود من السيرفر صوّره لي فقط.");});
+                runOnUiThread(()->{
+                    if(isFinishing() || isDestroyed() || client!=requestClient)return;
+                    accountRequestInFlight=false;
+                    setBusy(false,"فشل التحقق من QR");
+                    showError("QR السيارة",readableError(e)+"\nQR_AUTH | "+parsed.safeShape()+"\nلم يتم إرسال تأكيد تسجيل الدخول.");
+                });
             }
         });
     }
 
     private void confirmQr(String scanId,String vin){
+        if(client==null || !accountAuthenticated || accountRequestInFlight)return;
+        final BydApiClient requestClient=client;
+        accountRequestInFlight=true;
         setBusy(true,"تأكيد تسجيل الدخول على السيارة…");
         worker.execute(()->{
             try{
-                JSONObject result=client.scanLoginByAction(scanId,vin);
-                securePrefs.put("qrLinked","1");
-                runOnUiThread(()->{setBusy(false,"تم تأكيد QR");showError("تم الربط","تم إرسال تأكيد تسجيل الدخول إلى BYD بنجاح.\n"+serverMessage(result));});
-            }catch(Exception e){runOnUiThread(()->{setBusy(false,"تعذر تأكيد QR");showError("تأكيد QR",readableError(e));});}
+                requestClient.scanLoginByAction(scanId,vin);
+                runOnUiThread(()->{
+                    if(isFinishing() || isDestroyed() || client!=requestClient)return;
+                    accountRequestInFlight=false;
+                    qrConfirmedThisSession=true;
+                    setBusy(false,"قبل BYD تأكيد QR");
+                    showError("تأكيد QR","قبل BYD طلب التأكيد. تحقق من اكتمال الدخول على شاشة السيارة، ثم أعد جلب قائمة السيارات. قبول الطلب لا يثبت ربط ملكية السيارة.");
+                });
+            }catch(Exception e){runOnUiThread(()->{
+                if(isFinishing() || isDestroyed() || client!=requestClient)return;
+                accountRequestInFlight=false;
+                setBusy(false,"تعذر تأكيد QR");showError("تأكيد QR",readableError(e));
+            });}
         });
     }
 
     private void cancelQrQuietly(String scanId){
-        if(scanId==null||scanId.isEmpty())return;
-        worker.execute(()->{try{client.scanLoginCancel(scanId);}catch(Exception ignored){}});
+        if(scanId==null||scanId.isEmpty()||client==null)return;
+        final BydApiClient requestClient=client;
+        worker.execute(()->{try{requestClient.scanLoginCancel(scanId);}catch(Exception ignored){}});
     }
 
     // ---------------------------------------------------------------------
@@ -625,7 +771,7 @@ public final class MainActivity extends Activity {
         LinearLayout root=column();root.setPadding(dp(18),dp(18),dp(18),dp(28));scroll.addView(root,matchWrap());
         LinearLayout top=new LinearLayout(this);top.setOrientation(LinearLayout.HORIZONTAL);top.setGravity(Gravity.CENTER_VERTICAL);top.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         TextView t=label("الإعدادات",25,theme.text,true);t.setGravity(Gravity.RIGHT);top.addView(t,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
-        Button back=ghostButton("رجوع");back.setOnClickListener(v->showDashboard());top.addView(back,new LinearLayout.LayoutParams(dp(80),dp(44)));root.addView(top,lpMatch(0,dp(22)));
+        Button back=ghostButton("رجوع");back.setOnClickListener(v->showAccountHome());top.addView(back,new LinearLayout.LayoutParams(dp(80),dp(44)));root.addView(top,lpMatch(0,dp(22)));
 
         sectionTitle(root,"الثيمات","غيّر شكل التطبيق بدون تغيير محرك BYD China");
         GridLayout themes=new GridLayout(this);themes.setColumnCount(2);
@@ -640,12 +786,12 @@ public final class MainActivity extends Activity {
         root.addView(themes,lpMatch(0,dp(18)));
 
         sectionTitle(root,"ربط السيارة","استخدم QR الظاهر على شاشة السيارة بعد تسجيل الدخول");
-        LinearLayout qr=featureRow("▣","مسح QR السيارة",securePrefs.get("qrLinked","").equals("1")?"تم تأكيد QR سابقاً":"جاهز للمسح");
+        LinearLayout qr=featureRow("▣","مسح QR السيارة",qrConfirmedThisSession?"قبل BYD تأكيد QR في هذه الجلسة":"جاهز للمسح");
         qr.setOnClickListener(v->startQrScan());root.addView(qr,lpMatch(0,dp(12)));
 
         LinearLayout prox=featureRow("◉","الدخول عند الاقتراب","فتح عند الاقتراب وقفل عند الابتعاد");prox.setOnClickListener(v->showProximityInfo());root.addView(prox,lpMatch(0,dp(12)));
 
-        Button logout=ghostButton("تسجيل الخروج");logout.setOnClickListener(v->{client=null;showLogin();});root.addView(logout,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(52)));
+        Button logout=ghostButton("تسجيل الخروج");logout.setOnClickListener(v->{if(!accountRequestInFlight)logout();});root.addView(logout,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(52)));
         setContentView(scroll);
     }
 
@@ -689,7 +835,7 @@ public final class MainActivity extends Activity {
     private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}
     private void showError(String title,String msg){new AlertDialog.Builder(this).setTitle(title).setMessage(msg).setPositiveButton("حسناً",null).show();}
     private void confirm(String title,String msg,Runnable yes){new AlertDialog.Builder(this).setTitle(title).setMessage(msg).setNegativeButton("إلغاء",null).setPositiveButton("تنفيذ",(d,w)->yes.run()).show();}
-    private String readableError(Throwable e){String m=e.getMessage();if(m==null||m.trim().isEmpty())m=e.getClass().getSimpleName();return m;}
+    private String readableError(Throwable e){return SafeDiagnostics.describe(e);}
     private int findRegionIndex(String code){for(int i=0;i<BydRegion.SUPPORTED.size();i++)if(BydRegion.SUPPORTED.get(i).countryCode.equals(code))return i;return 0;}
     private String maskVin(String vin){if(vin==null||vin.length()<8)return vin;return vin.substring(0,4)+"••••"+vin.substring(vin.length()-4);}
     private String suffix(String v,String suffix){return v==null||v.isEmpty()||"—".equals(v)?"—":v+suffix;}
@@ -705,8 +851,6 @@ public final class MainActivity extends Activity {
         return "غير معروف";
     }
 
-    private String controlResultText(JSONObject o){if(o==null)return"تم الإرسال";int state=o.optInt("controlState",-1),res=o.optInt("res",-1);if(state==1||res==2)return"تم التنفيذ بنجاح";if(state==2)return"رفضت السيارة الأمر";return o.optString("message","تم إرسال الأمر");}
+    private String controlResultText(JSONObject o){if(o==null)return"تم الإرسال";int state=o.optInt("controlState",-1),res=o.optInt("res",-1);if(state==1||res==2)return"تم التنفيذ بنجاح";if(state==2)return"رفضت السيارة الأمر";return "تم إرسال الأمر";}
     private String firstValue(JSONObject o,String...keys){if(o==null)return"";for(String k:keys){Object v=o.opt(k);if(v!=null&&!JSONObject.NULL.equals(v)){String s=String.valueOf(v);if(!s.isEmpty())return s;}}JSONObject data=o.optJSONObject("data");if(data!=null)return firstValue(data,keys);return"";}
-    private String maskSecret(String s){if(s==null||s.length()<8)return"••••";return s.substring(0,3)+"••••"+s.substring(s.length()-3);}
-    private String serverMessage(JSONObject o){if(o==null)return"";String m=firstValue(o,"message","msg","result");return m.isEmpty()?"تم تنفيذ الطلب":m;}
 }

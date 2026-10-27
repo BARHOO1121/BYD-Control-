@@ -3,6 +3,10 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -16,10 +20,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
-      - name: Upload APK
+      - name: Test, lint and build unsigned release
+        run: gradle :app:testDebugUnitTest :app:lintRelease :app:assembleRelease --stacktrace
+      - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
         with:
-          name: CarX-BYD-Alpha4-QR-Themes
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: CarX-BYD-1.0.1-alpha4.2-unsigned
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarX-BYD-validation
+          path: |
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-release.html
+            app/build/test-results/testDebugUnitTest/
